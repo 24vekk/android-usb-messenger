@@ -1,0 +1,154 @@
+package com.example.loramessenger;
+
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.*;
+import androidx.appcompat.app.AppCompatActivity;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+import com.hoho.android.usbserial.util.SerialInputOutputManager;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.List;
+
+public class MainActivity extends AppCompatActivity {
+
+    private Spinner comPortSpinner;
+    private EditText usernameField;
+    private EditText inputField;
+    private TextView chatArea;
+    private Button sendButton;
+
+    private UsbSerialPort usbSerialPort;
+    private SerialInputOutputManager serialIoManager;
+    private Handler mainThreadHandler = new Handler(Looper.getMainLooper());
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // Инициализация элементов интерфейса
+        comPortSpinner = findViewById(R.id.comPortSpinner);
+        usernameField = findViewById(R.id.usernameField);
+        inputField = findViewById(R.id.inputField);
+        chatArea = findViewById(R.id.chatArea);
+        sendButton = findViewById(R.id.sendButton);
+
+        // Получение списка доступных COM-портов
+        List<UsbSerialDriver> availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(getUSBManager());
+        String[] portNames = new String[availableDrivers.size() + 1];
+        portNames[0] = "Select Port";
+        for (int i = 0; i < availableDrivers.size(); i++) {
+            portNames[i + 1] = availableDrivers.get(i).getPorts().get(0).toString();
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, portNames);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        comPortSpinner.setAdapter(adapter);
+
+        // Обработчик выбора COM-порта
+        comPortSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position > 0) {
+                    connectToComPort(availableDrivers.get(position - 1));
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                disconnectFromComPort();
+            }
+        });
+
+        // Обработчик кнопки отправки сообщения
+        sendButton.setOnClickListener(v -> sendMessage());
+    }
+
+    private void connectToComPort(UsbSerialDriver driver) {
+        try {
+            UsbSerialPort port = driver.getPorts().get(0);
+            port.open(getUSBConnection(driver.getDevice()));
+            port.setParameters(9600, UsbSerialPort.DATABITS_8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+
+            usbSerialPort = port;
+            startListeningForMessages();
+        } catch (IOException e) {
+            Toast.makeText(this, "Failed to connect to COM port", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void disconnectFromComPort() {
+        if (serialIoManager != null) {
+            serialIoManager.stop();
+            serialIoManager = null;
+        }
+        if (usbSerialPort != null) {
+            try {
+                usbSerialPort.close();
+            } catch (IOException ignored) {}
+            usbSerialPort = null;
+        }
+    }
+
+    private void startListeningForMessages() {
+        serialIoManager = new SerialInputOutputManager(usbSerialPort, new SerialInputOutputManager.Listener() {
+            @Override
+            public void onNewData(final byte[] data) {
+                mainThreadHandler.post(() -> updateChat(new String(data)));
+            }
+
+            @Override
+            public void onRunError(Exception e) {
+                e.printStackTrace();
+            }
+        });
+        new Thread(serialIoManager).start();
+    }
+
+    private void sendMessage() {
+        if (usbSerialPort == null || !usbSerialPort.isOpen()) {
+            Toast.makeText(this, "No COM port selected or connected!", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String username = usernameField.getText().toString().trim();
+        String message = inputField.getText().toString().trim();
+
+        if (!username.isEmpty() && !message.isEmpty()) {
+            String fullMessage = username + ": " + message;
+            updateChat(fullMessage);
+
+            try {
+                usbSerialPort.write(fullMessage.getBytes(), 1000);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            inputField.setText("");
+        }
+    }
+
+    private void updateChat(String message) {
+        chatArea.append(message + "\n");
+        ScrollView scrollView = findViewById(R.id.scrollView);
+        scrollView.fullScroll(ScrollView.FOCUS_DOWN);
+    }
+
+    private android.hardware.usb.UsbManager getUSBManager() {
+        return (android.hardware.usb.UsbManager) getSystemService(USB_SERVICE);
+    }
+
+    private android.hardware.usb.UsbDeviceConnection getUSBConnection(android.hardware.usb.UsbDevice device) {
+        return getUSBManager().openDevice(device);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        disconnectFromComPort();
+    }
+}
